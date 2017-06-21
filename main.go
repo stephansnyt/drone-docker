@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/urfave/cli"
 )
 
-var build = "0" // build number set at compile-time
+var rev string = "[unknown]"
 
 func main() {
 	// Load env-file if it exists first
@@ -18,142 +19,88 @@ func main() {
 	}
 
 	app := cli.NewApp()
-	app.Name = "docker plugin"
-	app.Usage = "docker plugin"
+	app.Name = "gdm plugin"
+	app.Usage = "gdm plugin"
 	app.Action = run
-	app.Version = fmt.Sprintf("1.0.%s", build)
+	app.Version = fmt.Sprintf("1.0.0-%s", rev)
 	app.Flags = []cli.Flag{
+		cli.StringFlag{
+			Name:   "action",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_ACTION",
+			Value:  "update",
+		},
+		cli.BoolFlag{
+			Name:   "async",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_ASYNC",
+		},
+		cli.StringFlag{
+			Name:   "config-template",
+			Usage:  "template for deployment configuration",
+			EnvVar: "PLUGIN_CONFIG_TEMPLATE",
+			Value:  ".gdm.yml",
+		},
+		cli.StringFlag{
+			Name:   "create-policy",
+			Usage:  "gcloud pass-through ",
+			EnvVar: "PLUGIN_CREATE_POLICY",
+		},
+		cli.StringFlag{
+			Name:   "delete-policy",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_DELETE_POLICY",
+		},
+		cli.StringFlag{
+			Name:   "deployment",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_DEPLOYMENT",
+		},
+		cli.StringFlag{
+			Name:   "description",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_DESCRIPTION",
+		},
 		cli.BoolFlag{
 			Name:   "dry-run",
-			Usage:  "dry run disables docker push",
+			Usage:  "If set, skips the final gcloud deployment manager command",
 			EnvVar: "PLUGIN_DRY_RUN",
 		},
 		cli.StringFlag{
-			Name:   "commit.sha",
-			Usage:  "git commit sha",
-			EnvVar: "DRONE_COMMIT_SHA",
-			Value:  "00000000",
+			Name:   "gcloud-cmd",
+			Usage:  "alternative gcloud cmd path, useful for local testing",
+			EnvVar: "PLUGIN_GCLOUD_CMD",
 		},
 		cli.StringFlag{
-			Name:   "daemon.mirror",
-			Usage:  "docker daemon registry mirror",
-			EnvVar: "PLUGIN_MIRROR",
-		},
-		cli.StringFlag{
-			Name:   "daemon.storage-driver",
-			Usage:  "docker daemon storage driver",
-			EnvVar: "PLUGIN_STORAGE_DRIVER",
-		},
-		cli.StringFlag{
-			Name:   "daemon.storage-path",
-			Usage:  "docker daemon storage path",
-			Value:  "/var/lib/docker",
-			EnvVar: "PLUGIN_STORAGE_PATH",
-		},
-		cli.StringFlag{
-			Name:   "daemon.bip",
-			Usage:  "docker daemon bride ip address",
-			EnvVar: "PLUGIN_BIP",
-		},
-		cli.StringFlag{
-			Name:   "daemon.mtu",
-			Usage:  "docker daemon custom mtu setting",
-			EnvVar: "PLUGIN_MTU",
-		},
-		cli.StringSliceFlag{
-			Name:   "daemon.dns",
-			Usage:  "docker daemon dns server",
-			EnvVar: "PLUGIN_CUSTOM_DNS",
+			Name:   "output-file",
+			Usage:  "interpolated template output file path",
+			EnvVar: "PLUGIN_OUTPUT_FILE",
+			Value:  ".drone-gdm.yml",
 		},
 		cli.BoolFlag{
-			Name:   "daemon.insecure",
-			Usage:  "docker daemon allows insecure registries",
-			EnvVar: "PLUGIN_INSECURE",
+			Name:   "preview",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_PREVIEW",
+		},
+		cli.StringFlag{
+			Name:   "project",
+			Usage:  "gcloud pass-through",
+			EnvVar: "PLUGIN_PROJECT",
+		},
+		cli.StringFlag{
+			Name:   "vars",
+			Usage:  "variables to use in the config template",
+			EnvVar: "PLUGIN_VARS",
 		},
 		cli.BoolFlag{
-			Name:   "daemon.ipv6",
-			Usage:  "docker daemon IPv6 networking",
-			EnvVar: "PLUGIN_IPV6",
-		},
-		cli.BoolFlag{
-			Name:   "daemon.experimental",
-			Usage:  "docker daemon Experimental mode",
-			EnvVar: "PLUGIN_EXPERIMENTAL",
-		},
-		cli.BoolFlag{
-			Name:   "daemon.debug",
-			Usage:  "docker daemon executes in debug mode",
-			EnvVar: "PLUGIN_DEBUG,DOCKER_LAUNCH_DEBUG",
-		},
-		cli.BoolFlag{
-			Name:   "daemon.off",
-			Usage:  "docker daemon executes in debug mode",
-			EnvVar: "PLUGIN_DAEMON_OFF",
+			Name:   "verbose",
+			Usage:  "verbose output including the interpolated template",
+			EnvVar: "PLUGIN_VERBOSE",
 		},
 		cli.StringFlag{
-			Name:   "dockerfile",
-			Usage:  "build dockerfile",
-			Value:  "Dockerfile",
-			EnvVar: "PLUGIN_DOCKERFILE",
-		},
-		cli.StringFlag{
-			Name:   "context",
-			Usage:  "build context",
-			Value:  ".",
-			EnvVar: "PLUGIN_CONTEXT",
-		},
-		cli.StringSliceFlag{
-			Name:     "tags",
-			Usage:    "build tags",
-			Value:    &cli.StringSlice{"latest"},
-			EnvVar:   "PLUGIN_TAG,PLUGIN_TAGS",
-			FilePath: ".tags",
-		},
-		cli.StringSliceFlag{
-			Name:   "args",
-			Usage:  "build args",
-			EnvVar: "PLUGIN_BUILD_ARGS",
-		},
-		cli.BoolFlag{
-			Name:   "squash",
-			Usage:  "squash the layers at build time",
-			EnvVar: "PLUGIN_SQUASH",
-		},
-		cli.BoolTFlag{
-			Name:   "pull-image",
-			Usage:  "force pull base image at build time",
-			EnvVar: "PLUGIN_PULL_IMAGE",
-		},
-		cli.BoolFlag{
-			Name:   "compress",
-			Usage:  "compress the build context using gzip",
-			EnvVar: "PLUGIN_COMPRESS",
-		},
-		cli.StringFlag{
-			Name:   "repo",
-			Usage:  "docker repository",
-			EnvVar: "PLUGIN_REPO",
-		},
-		cli.StringFlag{
-			Name:   "docker.registry",
-			Usage:  "docker registry",
-			Value:  defaultRegistry,
-			EnvVar: "PLUGIN_REGISTRY,DOCKER_REGISTRY",
-		},
-		cli.StringFlag{
-			Name:   "docker.username",
-			Usage:  "docker username",
-			EnvVar: "PLUGIN_USERNAME,DOCKER_USERNAME",
-		},
-		cli.StringFlag{
-			Name:   "docker.password",
-			Usage:  "docker password",
-			EnvVar: "PLUGIN_PASSWORD,DOCKER_PASSWORD",
-		},
-		cli.StringFlag{
-			Name:   "docker.email",
-			Usage:  "docker email",
-			EnvVar: "PLUGIN_EMAIL,DOCKER_EMAIL",
+			Name:   "token",
+			Usage:  "service account JSON",
+			EnvVar: "TOKEN",
 		},
 	}
 
@@ -163,39 +110,33 @@ func main() {
 }
 
 func run(c *cli.Context) error {
+	// this is the one bit of pre-processing done before calling plugin.Exec
+	// just to get Vars to be the right type
+	varsJson := c.String("vars")
+	vars := make(map[string]interface{})
+	if varsJson != "" {
+		err := json.Unmarshal([]byte(varsJson), &vars)
+		if err != nil {
+			return fmt.Errorf("Failure to unmarshal vars %s", err)
+		}
+	}
+
 	plugin := Plugin{
-		Dryrun: c.Bool("dry-run"),
-		Login: Login{
-			Registry: c.String("docker.registry"),
-			Username: c.String("docker.username"),
-			Password: c.String("docker.password"),
-			Email:    c.String("docker.email"),
-		},
-		Build: Build{
-			Name:       c.String("commit.sha"),
-			Dockerfile: c.String("dockerfile"),
-			Context:    c.String("context"),
-			Tags:       c.StringSlice("tags"),
-			Args:       c.StringSlice("args"),
-			Squash:     c.Bool("squash"),
-			Pull:       c.BoolT("pull-image"),
-			Compress:   c.Bool("compress"),
-			Repo:       c.String("repo"),
-		},
-		Daemon: Daemon{
-			Registry:      c.String("docker.registry"),
-			Mirror:        c.String("daemon.mirror"),
-			StorageDriver: c.String("daemon.storage-driver"),
-			StoragePath:   c.String("daemon.storage-path"),
-			Insecure:      c.Bool("daemon.insecure"),
-			Disabled:      c.Bool("daemon.off"),
-			IPv6:          c.Bool("daemon.ipv6"),
-			Debug:         c.Bool("daemon.debug"),
-			Bip:           c.String("daemon.bip"),
-			DNS:           c.StringSlice("daemon.dns"),
-			MTU:           c.String("daemon.mtu"),
-			Experimental:  c.Bool("daemon.experimental"),
-		},
+		Action:         c.String("action"),
+		Async:          c.Bool("async"),
+		ConfigTemplate: c.String("config-template"),
+		CreatePolicy:   c.String("create-policy"),
+		DeletePolicy:   c.String("delete-policy"),
+		Dryrun:         c.Bool("dry-run"),
+		Deployment:     c.String("deployment"),
+		Description:    c.String("description"),
+		GcloudCmd:      c.String("gcloud-cmd"),
+		OutputFile:     c.String("output-file"),
+		Preview:        c.Bool("preview"),
+		Project:        c.String("project"),
+		Token:          c.String("token"),
+		Vars:           vars,
+		Verbose:        c.Bool("verbose"),
 	}
 
 	return plugin.Exec()

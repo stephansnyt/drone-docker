@@ -1,314 +1,275 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
-)
-
-const (
-	// default docker registry
-	defaultRegistry = "https://index.docker.io/v1/"
+	"text/template"
 )
 
 type (
-	// Daemon defines Docker daemon parameters.
-	Daemon struct {
-		Registry      string   // Docker registry
-		Mirror        string   // Docker registry mirror
-		Insecure      bool     // Docker daemon enable insecure registries
-		StorageDriver string   // Docker daemon storage driver
-		StoragePath   string   // Docker daemon storage path
-		Disabled      bool     // DOcker daemon is disabled (already running)
-		Debug         bool     // Docker daemon started in debug mode
-		Bip           string   // Docker daemon network bridge IP address
-		DNS           []string // Docker daemon dns server
-		MTU           string   // Docker daemon mtu setting
-		IPv6          bool     // Docker daemon IPv6 networking
-		Experimental  bool     // Docker daemon enable experimental mode
-	}
-
-	// Login defines Docker login parameters.
-	Login struct {
-		Registry string // Docker registry address
-		Username string // Docker registry username
-		Password string // Docker registry password
-		Email    string // Docker registry email
-	}
-
-	// Build defines Docker build parameters.
-	Build struct {
-		Name       string   // Docker build using default named tag
-		Dockerfile string   // Docker build Dockerfile
-		Context    string   // Docker build context
-		Tags       []string // Docker build tags
-		Args       []string // Docker build args
-		Squash     bool     // Docker build squash
-		Pull       bool     // Docker build pull
-		Compress   bool     // Docker build compress
-		Repo       string   // Docker build repository
-	}
-
-	// Plugin defines the Docker plugin parameters.
 	Plugin struct {
-		Login  Login  // Docker login configuration
-		Build  Build  // Docker build configuration
-		Daemon Daemon // Docker daemon configuration
-		Dryrun bool   // Docker push is skipped
+		Action          string
+		Async           bool
+		ConfigTemplate  string
+		CreatePolicy    string
+		DeletePolicy    string
+		Deployment      string
+		Description     string
+		Dryrun          bool
+		GcloudCmd       string
+		OutputFile      string
+		Preview         bool
+		Project         string
+		Token           string //
+		Vars            map[string]interface{}
+		Verbose         bool
 	}
 )
 
 // Exec executes the plugin step
 func (p Plugin) Exec() error {
-	// start the Docker daemon server
-	if !p.Daemon.Disabled {
-		cmd := commandDaemon(p.Daemon)
-		if p.Daemon.Debug {
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-		} else {
-			cmd.Stdout = ioutil.Discard
-			cmd.Stderr = ioutil.Discard
-		}
-		go func() {
-			trace(cmd)
-			cmd.Run()
-		}()
+	p, err := checkAndFixParams(p)
+	if err != nil {
+		return err
 	}
 
-	// Concat the Registry URL and the Repository name if necessary
-	if strings.Count(p.Build.Repo, "/") == 1 {
-		p.Build.Repo = fmt.Sprintf("%s/%s", p.Login.Registry, p.Build.Repo)
+	// gcloud auth activate service account 
+	err = activateServiceAccount(p)
+	if err != nil {
+		return fmt.Errorf("error in activateServiceAccount: %s", err)
+	}
+	
+	// interpolate the template
+
+
+	if p.Verbose {
+		dumpFile(os.Stdout, "DEPLOYMENT CONFIGURATION", p.OutputFile)
 	}
 
-	// poll the docker daemon until it is started. This ensures the daemon is
-	// ready to accept connections before we proceed.
-	for i := 0; i < 15; i++ {
-		cmd := commandInfo()
-		err := cmd.Run()
-		if err == nil {
-			break
-		}
-		time.Sleep(time.Second * 1)
+	deployArgs := []string{
+		"--project",
+		p.Project,
+		"deployment-manager",
+		"deployments",
+		p.Action,
+		p.Deployment,
+		"--config",
+		p.OutputFile,
 	}
 
-	// login to the Docker registry
-	if p.Login.Password != "" {
-		cmd := commandLogin(p.Login)
-		err := cmd.Run()
-		if err != nil {
-			return fmt.Errorf("Error authenticating: %s", err)
-		}
-	} else {
-		fmt.Println("Registry credentials not provided. Guest mode enabled.")
+	if p.Preview {
+		deployArgs = append(deployArgs, "--preview")
 	}
 
-	if p.Build.Squash && !p.Daemon.Experimental {
-		fmt.Println("Squash build flag is only available when Docker deamon is started with experimental flag. Ignoring...")
-		p.Build.Squash = false
+	if p.Async {
+		deployArgs = append(deployArgs, "--async")
 	}
 
-	// add proxy build args
-	addProxyBuildArgs(&p.Build)
-
-	var cmds []*exec.Cmd
-	cmds = append(cmds, commandVersion())      // docker version
-	cmds = append(cmds, commandInfo())         // docker info
-
-	cmds = append(cmds, commandBuild(p.Build)) // docker build
-
-	for _, tag := range p.Build.Tags {
-		cmds = append(cmds, commandTag(p.Build, tag)) // docker tag
-
-		if p.Dryrun == false {
-			cmds = append(cmds, commandPush(p.Build, tag)) // docker push
-		}
+	if p.CreatePolicy != "" {
+		deployArgs = append(deployArgs, "--create-policy", p.CreatePolicy)
 	}
 
-	cmds = append(cmds, commandRmi(p.Build.Name)) // docker rmi
-	cmds = append(cmds, commandPrune())           // docker system prune -f
+	if p.DeletePolicy != "" {
+		deployArgs = append(deployArgs, "--delete-policy", p.DeletePolicy)
+	}
 
-	// execute all commands in batch mode.
-	for _, cmd := range cmds {
+	if p.Description != "" {
+		deployArgs = append(
+			deployArgs, 
+			fmt.Sprintf("--description=%s", p.Description),
+		)
+	}
+
+	cmd := exec.Command(p.GcloudCmd, deployArgs...)
+	trace(cmd)
+	if ! p.Dryrun {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		trace(cmd)
+		err = cmd.Run()
 
-		err := cmd.Run()
 		if err != nil {
-			return err
+			return fmt.Errorf("Unable to update deployment: %s", err)
 		}
 	}
 
 	return nil
 }
 
-const dockerExe = "/usr/local/bin/docker"
-const dockerdExe = "/usr/local/bin/dockerd"
-
-// helper function to create the docker login command.
-func commandLogin(login Login) *exec.Cmd {
-	if login.Email != "" {
-		return commandLoginEmail(login)
-	}
-	return exec.Command(
-		dockerExe, "login",
-		"-u", login.Username,
-		"-p", login.Password,
-		login.Registry,
-	)
-}
-
-func commandLoginEmail(login Login) *exec.Cmd {
-	return exec.Command(
-		dockerExe, "login",
-		"-u", login.Username,
-		"-p", login.Password,
-		"-e", login.Email,
-		login.Registry,
-	)
-}
-
-// helper function to create the docker info command.
-func commandVersion() *exec.Cmd {
-	return exec.Command(dockerExe, "version")
-}
-
-// helper function to create the docker info command.
-func commandInfo() *exec.Cmd {
-	return exec.Command(dockerExe, "info")
-}
-
-// helper function to create the docker build command.
-func commandBuild(build Build) *exec.Cmd {
-	args := []string{
-		"build",
-		"--rm=true",
-		"-f", build.Dockerfile,
-		"-t", build.Name,
+func checkAndFixParams(p Plugin) (Plugin, error) {
+	// check required params and set defaults
+	p.Token = strings.TrimSpace(p.Token)
+	if p.Token == "" {
+		return p, fmt.Errorf("Missing required param: token")
 	}
 
-	args = append(args, build.Context)
-	if build.Squash {
-		args = append(args, "--squash")
-	}
-	if build.Compress {
-		args = append(args, "--compress")
-	}
-	if build.Pull {
-		args = append(args, "--pull=true")
-	}
-	for _, arg := range build.Args {
-		args = append(args, "--build-arg", arg)
-	}
-
-	return exec.Command(dockerExe, args...)
-}
-
-// helper function to add proxy values from the environment
-func addProxyBuildArgs(build *Build) {
-	addProxyValue(build, "http_proxy")
-	addProxyValue(build, "https_proxy")
-	addProxyValue(build, "no_proxy")
-}
-
-// helper function to add the upper and lower case version of a proxy value.
-func addProxyValue(build *Build, key string) {
-	value := getProxyValue(key)
-
-	if len(value) > 0 && !hasProxyBuildArg(build, key) {
-		build.Args = append(build.Args, fmt.Sprintf("%s=%s", key, value))
-		build.Args = append(build.Args, fmt.Sprintf("%s=%s", strings.ToUpper(key), value))
-	}
-}
-
-// helper function to get a proxy value from the environment.
-//
-// assumes that the upper and lower case versions of are the same.
-func getProxyValue(key string) string {
-	value := os.Getenv(key)
-
-	if len(value) > 0 {
-		return value
-	}
-
-	return os.Getenv(strings.ToUpper(key))
-}
-
-// helper function that looks to see if a proxy value was set in the build args.
-func hasProxyBuildArg(build *Build, key string) bool {
-	keyUpper := strings.ToUpper(key)
-
-	for _, s := range build.Args {
-		if strings.HasPrefix(s, key) || strings.HasPrefix(s, keyUpper) {
-			return true
+	// some of this behavior is borrowed from drone-gke
+	// it will look at the token for project value
+	// but maybe we would rather not make that a default
+	// imagine a service account that belongs to a project,
+	// but given IAM access to do deployments on other projects
+	p.Project = strings.TrimSpace(p.Project)
+	if p.Project == "" {
+		p.Project = getProjectFromToken(p.Token)
+		if p.Project == "" {
+			return p, fmt.Errorf("Missing required param: project")
 		}
 	}
 
-	return false
+	if p.Deployment == "" {
+		return p, fmt.Errorf("Missing required param: deployment")
+	}
+
+	sdkPath := "/google-cloud-sdk"
+
+	// Defaults.
+	p.GcloudCmd = strings.TrimSpace(p.GcloudCmd)
+	if p.GcloudCmd == "" {
+		p.GcloudCmd = fmt.Sprintf("%s/bin/gcloud", sdkPath)
+	}
+
+	p.ConfigTemplate = strings.TrimSpace(p.ConfigTemplate)
+	if p.ConfigTemplate == "" {
+		p.ConfigTemplate = ".gdm.yml"
+	}
+
+	return p, nil
 }
 
-// helper function to create the docker tag command.
-func commandTag(build Build, tag string) *exec.Cmd {
-	var (
-		source = build.Name
-		target = fmt.Sprintf("%s:%s", build.Repo, tag)
+func activateServiceAccount(p Plugin) error {
+	keyPath := "/tmp/gcloud.json"
+
+	// Write credentials to tmp file to be picked up by the 'gcloud' command.
+	// This is inside the ephemeral plugin container, not on the host.
+	err := ioutil.WriteFile(keyPath, []byte(p.Token), 0600)
+	if err != nil {
+		return fmt.Errorf("Error writing token file: %s\n", err)
+	}
+
+	// Warn if the keyfile can't be deleted, but don't abort.
+	// We're almost certainly running inside an ephemeral container, so the file will be discarded anyway.
+	defer func() {
+		err := os.Remove(keyPath)
+		if err != nil {
+			fmt.Printf("Warning: error removing token file: %s\n", err)
+		}
+	}()
+
+	cmd := exec.Command(
+		p.GcloudCmd, 
+		"auth",
+		"activate-service-account",
+		"--key-file",
+		keyPath,
 	)
-	return exec.Command(
-		dockerExe, "tag", source, target,
-	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	trace(cmd)
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("Unable to activate service account: %s", err)
+	}
+
+	return nil
 }
 
-// helper function to create the docker push command.
-func commandPush(build Build, tag string) *exec.Cmd {
-	target := fmt.Sprintf("%s:%s", build.Repo, tag)
-	return exec.Command(dockerExe, "push", target)
-}
+func interpolateTemplate(p Plugin) error {
+	wd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("Error while getting working directory: %s\n", err)
+	}
 
-// helper function to create the docker daemon command.
-func commandDaemon(daemon Daemon) *exec.Cmd {
-	args := []string{"-g", daemon.StoragePath}
+	inPath := filepath.Join(wd, p.ConfigTemplate)
+	bn := filepath.Base(inPath)
 
-	if daemon.StorageDriver != "" {
-		args = append(args, "-s", daemon.StorageDriver)
+	_, err = os.Stat(inPath)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("Error finding template: %s\n", err)
 	}
-	if daemon.Insecure && daemon.Registry != "" {
-		args = append(args, "--insecure-registry", daemon.Registry)
+	// Generate the file.
+	blob, err := ioutil.ReadFile(inPath)
+	if err != nil {
+		return fmt.Errorf("Error reading template: %s\n", err)
 	}
-	if daemon.IPv6 {
-		args = append(args, "--ipv6")
-	}
-	if len(daemon.Mirror) != 0 {
-		args = append(args, "--registry-mirror", daemon.Mirror)
-	}
-	if len(daemon.Bip) != 0 {
-		args = append(args, "--bip", daemon.Bip)
-	}
-	for _, dns := range daemon.DNS {
-		args = append(args, "--dns", dns)
-	}
-	if len(daemon.MTU) != 0 {
-		args = append(args, "--mtu", daemon.MTU)
-	}
-	if daemon.Experimental {
-		args = append(args, "--experimental")
-	}
-	return exec.Command(dockerdExe, args...)
-}
 
-func commandPrune() *exec.Cmd {
-	return exec.Command(dockerExe, "system", "prune", "-f")
-}
+	tmpl, err := template.New(bn).Option("missingkey=error").Parse(string(blob))
+	if err != nil {
+		return fmt.Errorf("Error parsing template: %s\n", err)
+	}
 
-func commandRmi(tag string) *exec.Cmd {
-	return exec.Command(dockerExe, "rmi", tag)
+	f, err := os.Create(p.OutputFile)
+	if err != nil {
+		return fmt.Errorf("Error creating deployment config file: %s\n", err)
+	}
+
+	err = tmpl.Execute(f, p.Vars)
+	if err != nil {
+		return fmt.Errorf("Error executing deployment template: %s\n", err)
+	}
+
+	f.Close()
+
+	return nil
 }
 
 // trace writes each command to stdout with the command wrapped in an xml
 // tag so that it can be extracted and displayed in the logs.
 func trace(cmd *exec.Cmd) {
 	fmt.Fprintf(os.Stdout, "+ %s\n", strings.Join(cmd.Args, " "))
+}
+
+type token struct {
+	ProjectID string `json:"project_id"`
+}
+
+func getProjectFromToken(j string) string {
+	t := token{}
+	err := json.Unmarshal([]byte(j), &t)
+	if err != nil {
+		return ""
+	}
+	return t.ProjectID
+}
+
+func getNewPath(path string) (string, error) {
+	for i := 0; i <= 100; i++ {
+		newPath := fmt.Sprintf("%s.%d", path, i)
+		_, err := os.Stat(newPath)
+		if os.IsNotExist(err) {
+			return newPath, nil
+		}
+	}
+	return "", fmt.Errorf("Unable to getNewPath, all permutations existed already")
+}
+
+func dumpData(w io.Writer, caption string, data interface{}) {
+	fmt.Fprintf(w, "---START %s---\n", caption)
+	defer fmt.Fprintf(w, "---END %s---\n", caption)
+
+	b, err := json.MarshalIndent(data, "", "\t")
+	if err != nil {
+		fmt.Fprintf(w, "error marshalling: %s\n", err)
+		return
+	}
+
+	w.Write(b)
+	fmt.Fprintf(w, "\n")
+}
+
+func dumpFile(w io.Writer, caption, path string) {
+	fmt.Fprintf(w, "---START %s---\n", caption)
+	defer fmt.Fprintf(w, "---END %s---\n", caption)
+
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(w, "error reading file: %s\n", err)
+		return
+	}
+
+	fmt.Fprintln(w, string(data))
 }
