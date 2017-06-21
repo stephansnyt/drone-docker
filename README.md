@@ -1,5 +1,10 @@
 # drone-gdm
 
+# TODO
+
+when this repo gets a home, open an issue for this problem:
+to update a deployment that's currently in preview, you need to do an update and pass the name of the deployment, and not pass anything else. this is currently not possible in this plugin. if you put a deployment in preview, you can only update the preview. someone must apply the preview out of band (via cli or web gui)
+
 [![Build Status]]
 [![Go Doc]]
 [![Go Report]]
