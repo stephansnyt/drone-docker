@@ -46,7 +46,7 @@ func (p Plugin) Exec() error {
 	}
 	
 	// interpolate the template
-
+	interpolateTemplate(p)
 
 	if p.Verbose {
 		dumpFile(os.Stdout, "DEPLOYMENT CONFIGURATION", p.OutputFile)
