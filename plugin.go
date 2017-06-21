@@ -34,6 +34,10 @@ type (
 
 // Exec executes the plugin step
 func (p Plugin) Exec() error {
+	if p.Verbose {
+		fmt.Printf("%+v\n", p.Vars)
+	}
+
 	p, err := checkAndFixParams(p)
 	if err != nil {
 		return err
