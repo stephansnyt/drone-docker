@@ -50,7 +50,10 @@ func (p Plugin) Exec() error {
 	}
 	
 	// interpolate the template
-	interpolateTemplate(p)
+	err = interpolateTemplate(p)
+	if err != nil {
+		return fmt.Errorf("error interpolating template: %s", err)
+	}
 
 	if p.Verbose {
 		dumpFile(os.Stdout, "DEPLOYMENT CONFIGURATION TEMPLATE", p.ConfigTemplate)
