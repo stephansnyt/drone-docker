@@ -53,6 +53,8 @@ func (p Plugin) Exec() error {
 	interpolateTemplate(p)
 
 	if p.Verbose {
+		dumpFile(os.Stdout, "DEPLOYMENT CONFIGURATION TEMPLATE", p.ConfigTemplate)
+
 		dumpFile(os.Stdout, "DEPLOYMENT CONFIGURATION", p.OutputFile)
 	}
 
